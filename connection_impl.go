@@ -30,10 +30,10 @@ const (
 
 // connection is the implement of Connection
 type connection struct {
-	netFD
-	onEvent
-	locker
-	operator        *FDOperator
+	netFD                       //网络文件描述符的封装，专注于网络IO
+	onEvent                     //网络层面的事件触发器，由用户定义，在NetPoll的server初始化的时候，通过option的方式设置
+	locker                      //分片锁
+	operator        *FDOperator //同样是socket文件描述符的封装，专注与内存层面的IO，里面的OnRead触发器，只有监听描述符（执行accept的文件描述符）才会有，NetPoll通过onRead是否为nil来判断是不是监听文件描述符。
 	readTimeout     time.Duration
 	readTimer       *time.Timer
 	readTrigger     chan struct{}

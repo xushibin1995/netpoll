@@ -179,6 +179,8 @@ func (b *LinkBuffer) Skip(n int) (err error) {
 // Release the node that has been read.
 // b.flush == nil indicates that this LinkBuffer is created by LinkBuffer.Slice
 func (b *LinkBuffer) Release() (err error) {
+	//普通链表（origin链表）是可写的，旗下的的write指针和flush指针指向同一个节点
+	//引用链表是只读的，所以他下面的节点的write指针为nil，只能用flush指针，flush指针只会在初始化的时候填值，后续不会修改
 	for b.read != b.flush && b.read.Len() == 0 {
 		b.read = b.read.next
 	}
@@ -274,6 +276,8 @@ func (b *LinkBuffer) Until(delim byte) (line []byte, err error) {
 // and only holds the ability of Reader.
 //
 // Slice will automatically execute a Release.
+// Slice 会返回一个引用链表，所有节点不拥有数据，只是有通过LinkBufferNode的Refer方法，创造引用节点。
+// 所有引用节点都是只读的，通过flush指针连接
 func (b *LinkBuffer) Slice(n int) (r Reader, err error) {
 	if n <= 0 {
 		return NewLinkBuffer(0), nil
@@ -288,6 +292,7 @@ func (b *LinkBuffer) Slice(n int) (r Reader, err error) {
 	p := &LinkBuffer{
 		length: int64(n),
 	}
+	//这个defer会把引用节点的flush指针指向最后一个节点的后一个节点（nil）
 	defer func() {
 		// set to read-only
 		p.flush = p.flush.next
@@ -313,11 +318,13 @@ func (b *LinkBuffer) Slice(n int) (r Reader, err error) {
 			p.flush = p.flush.next
 			break
 		} else if l > 0 {
+			//Refer的内部会调用LinkBufferNode的Next方法，这个方法会推进其内部的off（读游标），使得这个节点变成已读状态，或者部分读取状态
 			p.flush.next = b.read.Refer(l)
 			p.flush = p.flush.next
 		}
 		b.read = b.read.next
 	}
+	//调用b.Release()释放origin链表已读取的部分
 	return p, b.Release()
 }
 
@@ -572,7 +579,8 @@ func (b *LinkBuffer) GetBytes(p [][]byte) (vs [][]byte) {
 //
 // bookSize: The size of data that can be read at once.
 // maxSize: The maximum size of data between two Release(). In some cases, this can
-// 	guarantee all data allocated in one node to reduce copy.
+//
+//	guarantee all data allocated in one node to reduce copy.
 func (b *LinkBuffer) book(bookSize, maxSize int) (p []byte) {
 	l := cap(b.write.buf) - b.write.malloc
 	// grow linkBuffer
@@ -751,6 +759,7 @@ func (node *linkBufferNode) Refer(n int) (p *linkBufferNode) {
 // 1. reduce the reference count of itself and origin.
 // 2. recycle the buf when the reference count is 0.
 func (node *linkBufferNode) Release() (err error) {
+	// 对于origin节点引用计数减一，到0就回收。对于引用节点需要先处理origin节点，然后回收
 	if node.origin != nil {
 		node.origin.Release()
 	}

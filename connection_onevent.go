@@ -162,6 +162,7 @@ func (c *connection) onRequest() (needTrigger bool) {
 			_ = onRequest(c.ctx, c)
 		},
 	)
+
 	// if not processed, should trigger read
 	return !processed
 }
