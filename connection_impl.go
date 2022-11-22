@@ -41,13 +41,13 @@ type connection struct {
 	writeTimeout    time.Duration
 	writeTimer      *time.Timer
 	writeTrigger    chan error
-	inputBuffer     *LinkBuffer
-	outputBuffer    *LinkBuffer
-	inputBarrier    *barrier
-	outputBarrier   *barrier
-	supportZeroCopy bool
-	maxSize         int // The maximum size of data between two Release().
-	bookSize        int // The size of data that can be read at once.
+	inputBuffer     *LinkBuffer //client--->server数据读缓冲区
+	outputBuffer    *LinkBuffer //server--->client数据写缓冲区
+	inputBarrier    *barrier    //数据读缓冲区，存在的目的是为了适配C语言的数组，方便调用系统调用
+	outputBarrier   *barrier    //写缓冲区，存在的目的是为了适配C语言的数组，方便调用系统调用
+	supportZeroCopy bool        //是否支持零拷贝
+	maxSize         int         // The maximum size of data between two Release().
+	bookSize        int         // The size of data that can be read at once.
 }
 
 var _ Connection = &connection{}
@@ -156,6 +156,8 @@ func (c *connection) Len() (length int) {
 }
 
 // Until implements Connection.
+// netpoll本身并没有提供codec，编解码由调用netpoll的上层负责，
+// 这里对外提供Until接口，上层利用这个接口可以通过传入一个这个特殊的分隔符，从数据流中读取一个数据帧。
 func (c *connection) Until(delim byte) (line []byte, err error) {
 	var n, l int
 	for {
@@ -166,6 +168,9 @@ func (c *connection) Until(delim byte) (line []byte, err error) {
 		}
 
 		l = c.inputBuffer.Len()
+		//参数n表示需要跳过的字节数
+		//n是上一个循环中的l，这样可以避免在上一个循环中已经搜索过的数据范围里重复搜索
+		//缺点是每次循环调用indexByte，在indexByte内部都要从Read指针开始向后偏移
 		i := c.inputBuffer.indexByte(delim, n)
 		if i < 0 {
 			n = l //skip all exists bytes
@@ -316,7 +321,7 @@ func (c *connection) init(conn Conn, opts *options) (err error) {
 	c.bookSize, c.maxSize = block1k/2, pagesize
 	c.inputBuffer, c.outputBuffer = NewLinkBuffer(pagesize), NewLinkBuffer()
 	c.inputBarrier, c.outputBarrier = barrierPool.Get().(*barrier), barrierPool.Get().(*barrier)
-
+	//Conn类型虽然是个接口，但是initNetFD里面抓哟了断言，限制了传入的conn必须是 *netFD
 	c.initNetFD(conn) // conn must be *netFD{}
 	c.initFDOperator()
 	c.initFinalizer()

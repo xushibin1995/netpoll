@@ -94,11 +94,15 @@ func readv(fd int, bs [][]byte, ivs []syscall.Iovec) (n int, err error) {
 }
 
 // TODO: read from sysconf(_SC_IOV_MAX)? The Linux default is
-//  1024 and this seems conservative enough for now. Darwin's
-//  UIO_MAXIOV also seems to be 1024.
+//
+//	1024 and this seems conservative enough for now. Darwin's
+//	UIO_MAXIOV also seems to be 1024.
+//
 // iovecs limit length to 2GB(2^31)
 func iovecs(bs [][]byte, ivs []syscall.Iovec) (iovLen int) {
 	totalLen := 0
+	//把bs 二维切片转化成为Iovec结构，在做系统调用时需要形成类似于C语言的数据结构
+	//C语言没有切片，数组不包含数据长度信息，Iovec中的Base指针指向数组的地址，Len表示数组中有效数据长度
 	for i := 0; i < len(bs); i++ {
 		chunk := bs[i]
 		l := len(chunk)

@@ -28,7 +28,7 @@ type FDOperator struct {
 	// The poll actively fire the FDOperator when fd changes, no check the return value of FDOperator.
 	OnRead  func(p Poll) error //读触发器，只有执行accept的文件描述符才有，其他的文件描述符的OnRead为nil
 	OnWrite func(p Poll) error //写触发器，只有执行epoll的文件描述符才有，其他类型的文件描述符OnWrite为nil
-	OnHup   func(p Poll) error //挂起触发器，普通连接文件描述符和epoll文件描述符有
+	OnHup   func(p Poll) error //挂起触发器，普通连接文件描述符用它来关闭连接，epoll文件描述符的OnHup也不为nil，用来关闭整个poller
 
 	// The following is the required fn, which must exist when used, or directly panic.
 	// Fns are only called by the poll when handles connection events.

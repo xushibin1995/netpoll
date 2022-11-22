@@ -50,15 +50,16 @@ func NewLinkBuffer(size ...int) *LinkBuffer {
 
 // LinkBuffer implements ReadWriter.
 type LinkBuffer struct {
-	length     int64
-	mallocSize int
+	length     int64 //所有节点的可读数据总长度和
+	mallocSize int   //可以看做是LinkBuffer对外暴露的可利用空间和，也是所有节点的已分配空间和，但是不代表底层内存空间容量和，因为有些节点的内存利用率并非100%
 
-	head  *linkBufferNode // release head
-	read  *linkBufferNode // read head
-	flush *linkBufferNode // malloc head
-	write *linkBufferNode // malloc tail
+	head  *linkBufferNode // release head   //指向第一个节点
+	read  *linkBufferNode // read head      //读指针
+	flush *linkBufferNode // malloc head    //可以看做是读指针和写指针中间的屏障，read指针到flush指针之间的数是可以安全读取的的，flush到write是正在写入的，每次运行LinkBuffer的Flush()方法会，会向后移动flush指针。
+	write *linkBufferNode // malloc tail    //写指针，指向最后一个LinkBuffer节点
 
 	caches [][]byte // buf allocated by Next when cross-package, which should be freed when release
+	//linkBufferNode的底层存储buf是一个[]byte类型切片，这里的caches就是对着写切片的记录，方便回收这些切片指向的空间。
 }
 
 var _ Reader = &LinkBuffer{}
@@ -78,6 +79,7 @@ func (b *LinkBuffer) IsEmpty() (ok bool) {
 // ------------------------------------------ implement zero-copy reader ------------------------------------------
 
 // Next implements Reader.
+// Next会移动read指针
 func (b *LinkBuffer) Next(n int) (p []byte, err error) {
 	if n <= 0 {
 		return
@@ -117,6 +119,7 @@ func (b *LinkBuffer) Next(n int) (p []byte, err error) {
 
 // Peek does not have an independent lifecycle, and there is no signal to
 // indicate that Peek content can be released, so Peek will not introduce mcache for now.
+// Peek不会移动Read指针
 func (b *LinkBuffer) Peek(n int) (p []byte, err error) {
 	if n <= 0 {
 		return
@@ -179,8 +182,6 @@ func (b *LinkBuffer) Skip(n int) (err error) {
 // Release the node that has been read.
 // b.flush == nil indicates that this LinkBuffer is created by LinkBuffer.Slice
 func (b *LinkBuffer) Release() (err error) {
-	//普通链表（origin链表）是可写的，旗下的的write指针和flush指针指向同一个节点
-	//引用链表是只读的，所以他下面的节点的write指针为nil，只能用flush指针，flush指针只会在初始化的时候填值，后续不会修改
 	for b.read != b.flush && b.read.Len() == 0 {
 		b.read = b.read.next
 	}
@@ -581,6 +582,9 @@ func (b *LinkBuffer) GetBytes(p [][]byte) (vs [][]byte) {
 // maxSize: The maximum size of data between two Release(). In some cases, this can
 //
 //	guarantee all data allocated in one node to reduce copy.
+//
+// book 的作用是在写指指针指向的节点上分配空间，改方法只会在单个节点分配空间，如果最后一个节点空间为0，就新建一个节点，不会跨节点分配空间，确保分配出去的是连续的空间
+// maxSize由外部传入，初始值为8KB，后续会自动翻倍扩容，最大8MB
 func (b *LinkBuffer) book(bookSize, maxSize int) (p []byte) {
 	l := cap(b.write.buf) - b.write.malloc
 	// grow linkBuffer
@@ -588,16 +592,21 @@ func (b *LinkBuffer) book(bookSize, maxSize int) (p []byte) {
 		l = maxSize
 		b.write.next = newLinkBufferNode(maxSize)
 		b.write = b.write.next
+		//write指针前进，此时flush指针可能落后于write指针，因此在下面的bookAck中需要把flush指针向后移动。
 	}
 	if l > bookSize {
 		l = bookSize
 	}
+	//有可能不走上面的if，这意味着分配的空间可能比预定的空间小
+	//Malloc传递出去的是一个切片，但是对这个切片的修改，不会导致write指针指向的节点的buf切片的len的变化，所以有了下面的bookAck方法
 	return b.write.Malloc(l)
 }
 
 // bookAck will ack the first n malloc bytes and discard the rest.
 //
 // length: The size of data in inputBuffer. It is used to calculate the maxSize
+// bookAck和上面的book方法成对调用
+// bookAck用来移动flush指针
 func (b *LinkBuffer) bookAck(n int) (length int, err error) {
 	b.write.malloc = n + len(b.write.buf)
 	b.write.buf = b.write.buf[:b.write.malloc]
@@ -609,6 +618,7 @@ func (b *LinkBuffer) bookAck(n int) (length int, err error) {
 }
 
 // calcMaxSize will calculate the data size between two Release()
+// 计算可以回收的内存大小，把head指针向后移动，使其追上read指针
 func (b *LinkBuffer) calcMaxSize() (sum int) {
 	for node := b.head; node != b.read; node = node.next {
 		sum += len(node.buf)
@@ -625,6 +635,8 @@ func (b *LinkBuffer) indexByte(c byte, skip int) int {
 	}
 	var unread, n, l int
 	node := b.read
+	//如果skip横跨多个节点，node指针向前推进，跳过多个节点，
+	//每跳过一个节点skip就减去这个节点的Length，直到skip小于一个节点的Length，再从此时skip所指向的位置向后查找
 	for unread = size; unread > 0; unread -= n {
 		l = node.Len()
 		if l >= unread { // last node
@@ -654,7 +666,7 @@ func (b *LinkBuffer) indexByte(c byte, skip int) int {
 func (b *LinkBuffer) resetTail(maxSize int) {
 	// FIXME: The tail node must not be larger than 8KB to prevent Out Of Memory.
 	if maxSize <= pagesize {
-		b.write.Reset()
+		b.write.Reset() //Reset里面并没有回收内存，内部是buf = buf[:0]，如果超过8K的大内存不释放，一直占着，就有可能out_of_memory, 也就有了👆🏻的FIXME
 		return
 	}
 
@@ -716,6 +728,7 @@ func (node *linkBufferNode) IsEmpty() (ok bool) {
 }
 
 func (node *linkBufferNode) Reset() {
+	//如果是引用节点（不拥有数据） 或者  是origin节点但是被其他节点引用着，就直接return
 	if node.origin != nil || atomic.LoadInt32(&node.refer) != 1 {
 		return
 	}
@@ -730,10 +743,13 @@ func (node *linkBufferNode) Next(n int) (p []byte) {
 	return node.buf[off:node.off]
 }
 
+// Peek 和Next的区别在于Peek不会把node.off向后移动
 func (node *linkBufferNode) Peek(n int) (p []byte) {
 	return node.buf[node.off : node.off+n]
 }
 
+// Malloc 从调用链路看，总是在在linkBuffer的最后一个节点（write节点）分配空间，即便前面的节点可能还有空间
+// 调用Malloc之前需要确保想分配的空间不大于最后一个节点的剩余空间，否则会溢出，所以一般和*LinkBuffer的growth方法搭配使用
 func (node *linkBufferNode) Malloc(n int) (buf []byte) {
 	malloc := node.malloc
 	node.malloc += n
@@ -767,6 +783,7 @@ func (node *linkBufferNode) Release() (err error) {
 	if atomic.AddInt32(&node.refer, -1) == 0 {
 		// readonly nodes cannot recycle node.buf, other node.buf are recycled to mcache.
 		if !node.readonly {
+			// linkedPool 回收内存的内存只会把LinkBufferNode放回，实际存放数据的是linkBufferNode内部的buf, 这是一个字节切片，由mcache回收
 			free(node.buf)
 		}
 		node.buf, node.origin, node.next = nil, nil, nil
@@ -783,6 +800,7 @@ func (b *LinkBuffer) growth(n int) {
 		return
 	}
 	// Must skip read-only node.
+	//跳过只读节点，找到一个够放下连续n个字节的节点，如果找不到就在链表最后新建节点，这意味着链表中存在很多没有被填满的节点，空间利用率并非100%
 	for b.write.readonly || cap(b.write.buf)-b.write.malloc < n {
 		if b.write.next == nil {
 			b.write.next = newLinkBufferNode(n)
@@ -826,6 +844,10 @@ func unsafeStringToSlice(s string) (b []byte) {
 const mallocMax = block8k * block1k
 
 // malloc limits the cap of the buffer from mcache.
+// 超过8MB就让go分配内存，否则利用mcache内存池分配内存
+// mcache底层是一个[46]sync.Pool的数组，分别对应cap为2^0次方的切片的sync.Pool，cap为2^1次方的切片的sync.Pool......到2^45次方切片的sync.Pool
+// 虽然macahe支持分配2^45次方（32TB）的切片, 但是超过调用层面做了限制，超过maxSiz的不会动用mcache，而是采用多个节点的组合的方案
+// 分配内存时会把capacity向上圆整成2的整数次方
 func malloc(size, capacity int) []byte {
 	if capacity > mallocMax {
 		return make([]byte, size, capacity)
@@ -834,6 +856,8 @@ func malloc(size, capacity int) []byte {
 }
 
 // free limits the cap of the buffer from mcache.
+// 超过8MB就让go进行垃圾回收
+// 不超过8MB的就利用mcache内存池回收，回收的条件是切片的cap是2的整数次方，否则仍旧利用go进行GC
 func free(buf []byte) {
 	if cap(buf) > mallocMax {
 		return
